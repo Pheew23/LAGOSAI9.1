@@ -1,0 +1,18 @@
+[project]
+name = "Lagos AI 9.1"
+enable_telemetry = false
+user_env = []
+session_timeout = 3600
+cache = false
+
+[features]
+prompt_playground = false
+
+[features.audio]
+enabled = true
+
+[UI]
+name = "Lagos AI 9.1"
+description = "Premium Multimodal Assistant"
+theme = "dark"
+layout = "wide"
