@@ -4,11 +4,12 @@ import os
 import base64
 from pypdf import PdfReader
 from docx import Document
+import io  # <-- Modul baru untuk mengamankan data suara
 
 # --- 1. KONFIGURASI API ---
 API_KEY = os.environ.get("NVIDIA_API_KEY") 
 BASE_URL = "https://integrate.api.nvidia.com/v1"
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY") # Kunci khusus untuk jalur suara
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") 
 
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
@@ -126,39 +127,64 @@ async def main(message: cl.Message):
 
     await process_llm(final_prompt, images)
 
-# --- 5. JALUR MIKROFON (Revisi Anti-Macet) ---
+# --- 5. JALUR MIKROFON (Revisi Ultimate) ---
 @cl.on_audio_end
 async def on_audio_end(elements: list):
     if not groq_client:
-        await cl.Message(content="⚠️ Kunci API Groq belum diatur di Render.").send()
+        await cl.Message(content="⚠️ Kunci API Groq belum diatur di sistem.").send()
         return
         
     if not elements:
-        await cl.Message(content="⚠️ Suara tidak terdeteksi oleh sistem.").send()
         return
 
     audio_file = elements[0]
     
-    async with cl.Step(name="Menerjemahkan Suara...") as step:
-        try:
-            # Membaca file audio mentah dari Chainlit
+    # Pesan status agar aplikasi tidak terlihat "hang" atau membeku
+    status_msg = cl.Message(content="⏳ *Sedang mendengarkan suara Anda...*")
+    await status_msg.send()
+    
+    try:
+        # Ambil data suara secara aman
+        if hasattr(audio_file, "path") and audio_file.path and os.path.exists(audio_file.path):
             with open(audio_file.path, "rb") as f:
-                file_data = f.read()
-                
-            # Mengelabui Groq dengan memberikan nama file buatan (audio.wav)
-            transcription = await groq_client.audio.transcriptions.create(
-                model="whisper-large-v3",
-                file=("audio.wav", file_data, "audio/wav")
-            )
-            text_from_voice = transcription.text
-            step.output = "Berhasil menerjemahkan audio."
-        except Exception as e:
-            step.is_error = True
-            step.output = f"Gagal memproses suara: {str(e)}"
+                file_content = f.read()
+        else:
+            file_content = audio_file.content
+            
+        if not file_content:
+            await status_msg.update(content="⚠️ Rekaman kosong. Coba bicara lebih keras.")
             return
 
-    # Menampilkan hasil suara ke layar chat
-    await cl.Message(content=f'🎙️ *"{text_from_voice}"*', author="User").send()
-    
-    # Meneruskan teks ke AI untuk dijawab
-    await process_llm(text_from_voice, [])
+        # Konversi ke buffer memori
+        buffer = io.BytesIO(file_content)
+        
+        # Ekstrak tipe file dari browser Android dan buat nama file palsu
+        mime_type = getattr(audio_file, "mime", "audio/webm")
+        ext = mime_type.split('/')[-1].split(';')[0] if mime_type else "webm"
+        if ext not in ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm']:
+            ext = "webm"
+        buffer.name = f"rekaman.{ext}"
+
+        # Kirim ke server Groq Whisper
+        transcription = await groq_client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=buffer
+        )
+        text_from_voice = transcription.text.strip()
+        
+        # Hapus pesan loading
+        await status_msg.remove()
+
+        if not text_from_voice:
+            await cl.Message(content="⚠️ Maaf, suara Anda tidak terdengar oleh sistem.").send()
+            return
+
+        # Tampilkan teks ke layar chat
+        await cl.Message(content=f'🎙️ *"{text_from_voice}"*', author="User").send()
+        
+        # Lempar teksnya ke AI untuk dijawab
+        await process_llm(text_from_voice, [])
+
+    except Exception as e:
+        # Jika Groq menolak, jangan biarkan sistem macet. Tampilkan pesan merah!
+        await status_msg.update(content=f"⚠️ **GAGAL MEMPROSES SUARA**: {str(e)}")
