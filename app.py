@@ -2,7 +2,6 @@ import chainlit as cl
 from openai import AsyncOpenAI
 import os
 import base64
-import speech_recognition as sr
 import io
 from pypdf import PdfReader
 from docx import Document
@@ -10,11 +9,14 @@ from docx import Document
 # --- 1. KONFIGURASI API ---
 API_KEY = os.environ.get("NVIDIA_API_KEY") 
 BASE_URL = "https://integrate.api.nvidia.com/v1"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") # Kunci khusus untuk jalur suara
 
-# Menggunakan versi AsyncOpenAI agar lebih kuat menangani ribuan akses bersamaan
+# Engine Utama untuk Analisis & Chat
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# Model sama persis seperti sebelumnya
+# Engine Khusus untuk menerjemahkan Suara ke Teks secepat kilat
+groq_client = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+
 MODEL_MAPPING = {
     "1. Stabil": "google/gemma-4-31b-it",
     "2. Cepat (Teks Saja)": "thinkingmachines/inkling",
@@ -23,10 +25,9 @@ MODEL_MAPPING = {
     "5. Projek Khusus": "nvidia/nemotron-3-ultra-550b-a55b"
 }
 
-# --- 2. PENGATURAN AWAL (SAAT USER MEMBUKA WEB) ---
+# --- 2. PENGATURAN AWAL ---
 @cl.on_chat_start
 async def start():
-    # Membuat menu pengaturan di pojok layar
     settings = await cl.ChatSettings(
         [
             cl.input_widget.Select(
@@ -42,43 +43,45 @@ async def start():
     cl.user_session.set("message_history", [{"role": "system", "content": "Anda adalah Lagos AI 9.1 (Rian Dev), asisten analitik tingkat tinggi."}])
     
     await cl.Message(
-        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** di sebelah kiri kotak teks untuk melampirkan file/gambar, atau klik ikon **🎙️** di kanan untuk berbicara."
+        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** di sebelah kiri kotak teks untuk melampirkan file/gambar, atau tahan ikon **🎙️** di dalam kotak teks untuk berbicara."
     ).send()
 
-# --- 3. LOGIKA JIKA USER MENGGANTI MODEL ---
+# --- 3. GANTI MODEL ---
 @cl.on_settings_update
 async def setup_agent(settings):
     cl.user_session.set("model", MODEL_MAPPING[settings["Model"]])
     await cl.Message(content=f"⚙️ Engine beralih ke: **{settings['Model']}**").send()
 
-# --- 4. LOGIKA UTAMA (SAAT USER MENGIRIM PESAN/FILE/SUARA) ---
+# --- 4. LOGIKA UTAMA (MULTIMODAL & VOICE) ---
 @cl.on_message
 async def main(message: cl.Message):
     message_history = cl.user_session.get("message_history")
     model_name = cl.user_session.get("model")
     
-    # Chainlit otomatis menangkap file yang diunggah
     images = [file for file in message.elements if "image" in file.mime]
     docs = [file for file in message.elements if "pdf" in file.mime or "text" in file.mime or "word" in file.mime or "officedocument" in file.mime]
     audios = [file for file in message.elements if "audio" in file.mime]
     
     final_prompt = message.content or ""
     
-    # Proses Suara (Menggunakan layanan gratis Google)
+    # --- PROSES SUARA VIA GROQ (SUPER CEPAT & ANTI CRASH) ---
     if audios:
         async with cl.Step(name="Menerjemahkan Suara...") as step:
-            r = sr.Recognizer()
             try:
-                with sr.AudioFile(audios[0].path) as source:
-                    audio_data = r.record(source)
-                    text_from_voice = r.recognize_google(audio_data, language="id-ID")
-                    final_prompt += f" {text_from_voice}"
-                    step.output = f"Terdengar: {text_from_voice}"
+                # Membuka file rekaman langsung dari server Render
+                with open(audios[0].path, "rb") as audio_file:
+                    transcription = await groq_client.audio.transcriptions.create(
+                        model="whisper-large-v3",
+                        file=audio_file
+                    )
+                text_from_voice = transcription.text
+                final_prompt += f" {text_from_voice}"
+                step.output = f"Terdengar: {text_from_voice}"
             except Exception as e:
                 step.is_error = True
-                step.output = "Maaf, suara tidak terdengar jelas."
+                step.output = f"Gagal memproses suara: {str(e)}"
     
-    # Proses Dokumen
+    # --- PROSES DOKUMEN ---
     doc_text = ""
     for doc in docs:
         if "pdf" in doc.mime:
@@ -97,7 +100,7 @@ async def main(message: cl.Message):
     if doc_text:
         final_prompt = f"[KONTEN DOKUMEN]\n{doc_text}\n[AKHIR KONTEN]\n\n{final_prompt}"
 
-    # Siapkan data untuk dikirim ke NVIDIA
+    # --- PERSIAPKAN DATA GAMBAR & TEKS ---
     if images:
         content_payload = [{"type": "text", "text": final_prompt}]
         for img in images:
@@ -110,7 +113,6 @@ async def main(message: cl.Message):
     else:
         content_payload = final_prompt
 
-    # Abaikan jika kosong
     if not final_prompt.strip() and not images:
         return
 
@@ -118,7 +120,7 @@ async def main(message: cl.Message):
     msg = cl.Message(content="")
     await msg.send()
 
-    # Memanggil Engine dengan efek mengetik (Streaming)
+    # --- MEMANGGIL ENGINE NVIDIA (STREAMING) ---
     try:
         stream = await client.chat.completions.create(
             messages=message_history,
@@ -128,10 +130,11 @@ async def main(message: cl.Message):
             max_tokens=4096
         )
 
-        async for part in stream:
-            if part.choices and len(part.choices) > 0:
-                token = part.choices[0].delta.content or ""
-                await msg.stream_token(token)
+        async for chunk in stream:
+            if chunk.choices and len(chunk.choices) > 0:
+                token = chunk.choices[0].delta.content or ""
+                if token: 
+                    await msg.stream_token(token)
                 
     except Exception as e:
         await cl.Message(content=f"⚠️ Engine Error: {str(e)}").send()
