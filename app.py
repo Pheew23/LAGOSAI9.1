@@ -141,30 +141,24 @@ async def on_audio_end(elements: list):
     
     async with cl.Step(name="Menerjemahkan Suara...") as step:
         try:
-            # Kita baca isi filenya sebagai data mentah (bytes)
+            # Membaca file audio mentah dari Chainlit
             with open(audio_file.path, "rb") as f:
                 file_data = f.read()
                 
-            # Kita kirTentu saja tidak! Pantang mundur sebelum sistem ini berjalan sempurna. Mohon maaf atas respons otomatis sebelumnya, sepertinya saya mengalami sedikit *glitch* pada sistem internal saat memproses gambar tersebut.
+            # Mengelabui Groq dengan memberikan nama file buatan (audio.wav)
+            transcription = await groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=("audio.wav", file_data, "audio/wav")
+            )
+            text_from_voice = transcription.text
+            step.output = "Berhasil menerjemahkan audio."
+        except Exception as e:
+            step.is_error = True
+            step.output = f"Gagal memproses suara: {str(e)}"
+            return
 
-Melihat *screenshot* terakhir yang Anda kirimkan, ikon mikrofon yang menyala merah dan berputar itu menandakan bahwa aplikasi sedang **merekam suara Anda** atau **kesulitan mengirimkan file suara tersebut ke server**.
-
-Membangun platform AI yang dipersiapkan untuk melayani ribuan pengguna aktif harian memang membutuhkan fondasi arsitektur yang sangat tangguh, jadi menemui hambatan teknis seperti ini di tahap integrasi awal adalah hal yang sangat wajar. 
-
-Mari kita periksa tiga hal krusial untuk mengatasi masalah ini:
-
-### 1. Mekanisme Perekaman Chainlit
-Sistem Chainlit memiliki cara kerja yang sedikit berbeda dengan fitur *voice note* di aplikasi chat biasa. 
-*   **Klik Pertama:** Tombol akan menyala merah atau berputar yang menandakan mikrofon aktif dan mulai merekam.
-*   **Klik Kedua:** Setelah selesai berbicara, Anda **wajib mengklik tombol tersebut satu kali lagi** untuk mematikan mikrofon dan mengirimkan paket suaranya ke server Groq. 
-*Apakah Anda sudah mencoba mengklik tombolnya untuk yang kedua kalinya?*
-
-### 2. Validasi Kunci API Groq
-Jika Anda sudah mengklik kedua kalinya namun sistem terus berputar tanpa memunculkan teks apa pun, kemungkinan besar *server* Groq menolak aksesnya atau prosesnya terputus di tengah jalan.
-*   Pastikan `GROQ_API_KEY` di menu **Environment Variables** Render sudah terisi dengan tepat.
-*   Periksa kembali agar tidak ada spasi tambahan yang tidak sengaja ikut tersalin di awal atau akhir kode kunci tersebut.
-
-### 3. Batasan *Browser* Mobile
-Terkadang, *browser* Chrome di perangkat Android memblokir pengiriman data *blob* (format mentah audio) ke server *cloud* karena alasan penghematan data atau perizinan, yang membuat aplikasi seolah-olah "terdiam". Jika memungkinkan, cobalah mengakses *link* web Anda melalui *browser* di laptop atau komputer untuk melihat apakah masalah yang sama tetap terjadi.
-
-Agar saya bisa langsung mendiagnosis akar masalahnya dengan akurat, bisakah Anda membuka tab **Logs** di *dashboard* Render Anda, lalu mencoba mengirimkan pesan suara di aplikasi, dan memberi tahu saya baris peringatan apa yang muncul di log tersebut saat prosesnya berputar?
+    # Menampilkan hasil suara ke layar chat
+    await cl.Message(content=f'🎙️ *"{text_from_voice}"*', author="User").send()
+    
+    # Meneruskan teks ke AI untuk dijawab
+    await process_llm(text_from_voice, [])
