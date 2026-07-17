@@ -1,1 +1,6 @@
+[project]
+name = "Lagos AI 9.1"
 
+[features.audio]
+# Perintah sakti untuk memunculkan logo mikrofon
+enabled = true
