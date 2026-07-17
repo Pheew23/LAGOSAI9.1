@@ -1,313 +1,142 @@
-import streamlit as st
-from openai import OpenAI
-import io
-import re
-import base64
-import requests
+import chainlit as cl
+from openai import AsyncOpenAI
 import os
-from docx import Document
-from audio_recorder_streamlit import audio_recorder
+import base64
 import speech_recognition as sr
+import io
+from pypdf import PdfReader
+from docx import Document
 
-# --- 1. KONFIGURASI HALAMAN ---
-st.set_page_config(
-    page_title="Lagos AI 9.1 | Premium Chat",
-    page_icon="🔮",
-    layout="centered", 
-    initial_sidebar_state="collapsed"
-)
-
-# --- 2. CUSTOM CSS (GAYA CLEAN & BRANDING LAGOS) ---
-st.markdown("""
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;600;700&display=swap');
-
-        html, body, [class*="css"] {
-            font-family: 'Plus Jakarta Sans', sans-serif;
-        }
-
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        
-        /* Branding Lagos AI di Tengah Atas */
-        .header-title {
-            text-align: center;
-            font-size: 2.2rem;
-            font-weight: 700;
-            background: linear-gradient(90deg, #7d4eff, #00d2ff);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 0px;
-            padding-top: 10px;
-        }
-        .header-subtitle {
-            text-align: center;
-            color: #888888;
-            font-size: 0.95rem;
-            font-weight: 300;
-            margin-bottom: 30px;
-        }
-        
-        .stChatMessage:nth-child(even) {
-            background-color: rgba(255, 255, 255, 0.03) !important;
-            border-radius: 12px;
-            padding: 1rem;
-        }
-        
-        .file-pill {
-            display: inline-block;
-            background: rgba(125, 78, 255, 0.15);
-            color: #b59bf5;
-            padding: 4px 14px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            margin-right: 8px;
-            margin-bottom: 12px;
-            border: 1px solid rgba(125, 78, 255, 0.3);
-        }
-
-        /* Styling ala Gemini untuk area action (Attachment & Voice) */
-        .action-container {
-            display: flex;
-            gap: 10px;
-            margin-bottom: -15px;
-            padding-left: 10px;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- KONFIGURASI API ---
-# Menggunakan os.environ.get agar langsung bekerja di Render.com
+# --- 1. KONFIGURASI API ---
 API_KEY = os.environ.get("NVIDIA_API_KEY") 
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-# --- FUNGSI PEMBANTU ---
-@st.cache_data(show_spinner=False)
-def konversi_gambar_ke_base64(uploaded_file):
-    if uploaded_file is not None:
-        return base64.b64encode(uploaded_file.read()).decode('utf-8')
-    return None
+# Menggunakan versi AsyncOpenAI agar lebih kuat menangani ribuan akses bersamaan
+client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-@st.cache_data(show_spinner=False)
-def ekstrak_teks_dari_dokumen(uploaded_file):
-    teks_hasil = ""
-    nama_file = uploaded_file.name.lower()
-    try:
-        if nama_file.endswith('.pdf'):
-            from pypdf import PdfReader
-            reader = PdfReader(uploaded_file)
-            for page in reader.pages:
-                teks = page.extract_text()
-                if teks: teks_hasil += teks + "\n"
-        elif nama_file.endswith('.txt'):
-            teks_hasil = uploaded_file.read().decode("utf-8")
-        return teks_hasil.strip()
-    except Exception as e:
-        return ""
+# Model sama persis seperti sebelumnya
+MODEL_MAPPING = {
+    "1. Stabil": "google/gemma-4-31b-it",
+    "2. Cepat (Teks Saja)": "thinkingmachines/inkling",
+    "3. Analisis Mendalam": "mistralai/mistral-medium-3.5-128b",
+    "4. Sangat Cepat (Teks Saja)": "openai/gpt-oss-120b",
+    "5. Projek Khusus": "nvidia/nemotron-3-ultra-550b-a55b"
+}
 
-def buat_file_word(riwayat_pesan):
-    doc = Document()
-    doc.add_heading('Lagos AI 9.1 - Analisis Laporan', 0)
-    for msg in riwayat_pesan:
-        if msg["role"] == "system": continue
-        role_title = "User" if msg["role"] == "user" else "Lagos AI 9.1"
-        doc.add_heading(f"{role_title}", level=2)
-        content = msg["content"]
-        text_content = next((item["text"] for item in content if item["type"] == "text"), "") if isinstance(content, list) else str(content)
-        
-        for line in text_content.split('\n'):
-            line = line.strip()
-            if not line: continue
-            if line.startswith('# '): doc.add_heading(line[2:], 3)
-            elif line.startswith('- '): doc.add_paragraph(line[2:], style='List Bullet')
-            else: doc.add_paragraph(line)
-        doc.add_paragraph("\n" + "_"*40 + "\n")
-    bio = io.BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-    return bio
-
-# --- 3. INISIALISASI SESSION STATE ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": "Anda adalah Lagos AI 9.1 (Rian Dev), asisten analitik tingkat tinggi."}]
-if "temp_image" not in st.session_state:
-    st.session_state.temp_image = None
-if "temp_doc" not in st.session_state:
-    st.session_state.temp_doc = None
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
-
-# --- BRANDING UTAMA ---
-st.markdown('<div class="header-title">🔮 Lagos AI 9.1</div>', unsafe_allow_html=True)
-st.markdown('<div class="header-subtitle">Premium Multimodal Assistant</div>', unsafe_allow_html=True)
-
-# --- SIDEBAR ---
-with st.sidebar:
-    st.markdown("### ⚙️ Engine Status")
-    st.success("🤖 Lagos AI 9.1 Active")
-    
-    st.markdown("### 🧠 Pilih Model AI")
-    # MODEL SAMA PERSIS SEPERTI PERMINTAAN ANDA
-    MODEL_MAPPING = {
-        "google/gemma-4-31b-it": "1. Stabil",
-        "thinkingmachines/inkling": "2. Cepat(text only)",
-        "mistralai/mistral-medium-3.5-128b": "3. Analisis Mendalam",
-        "openai/gpt-oss-120b": "4. Sangat Cepat(text only)",
-        "nvidia/nemotron-3-ultra-550b-a55b": "5. Projek Khusus"
-    }
-    
-    MODEL_NAME = st.selectbox(
-        label="Pilih model aktif:",
-        options=list(MODEL_MAPPING.keys()),
-        index=1,
-        format_func=lambda x: MODEL_MAPPING[x],
-        label_visibility="collapsed"
-    )
-    
-    st.divider()
-    if st.button("🗑️ Bersihkan Memori Chat", type="secondary", use_container_width=True):
-        st.session_state.messages = [{"role": "system", "content": "Anda adalah Lagos AI 9.1 (Rian Dev), asisten analitik tingkat tinggi."}]
-        st.rerun()
-    
-    if len(st.session_state.messages) > 1:
-        file_word = buat_file_word(st.session_state.messages)
-        st.download_button(
-            label="📥 Unduh Laporan (.DOCX)",
-            data=file_word,
-            file_name="Lagos_AI_9.1_Report.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-            type="primary"
-        )
-
-# --- 4. AREA OBROLAN UTAMA ---
-if len(st.session_state.messages) == 1:
-    st.markdown("<p style='text-align: center; margin-top: 5vh; color: #666;'>Sistem siap. Lampirkan gambar/dokumen atau ketik pertanyaan Anda di bawah.</p>", unsafe_allow_html=True)
-
-for message in st.session_state.messages:
-    if message["role"] == "system": continue
-    with st.chat_message(message["role"]):
-        content = message["content"]
-        text_disp = next((item["text"] for item in content if item["type"] == "text"), "") if isinstance(content, list) else str(content)
-        st.markdown(text_disp)
-
-st.markdown("<div style='height: 100px'></div>", unsafe_allow_html=True)
-
-# --- 5. AREA INPUT TERPADU (UI GEMINI-STYLE) ---
-input_container = st.container()
-
-with input_container:
-    current_img = st.session_state.get(f"img_{st.session_state.uploader_key}")
-    current_doc = st.session_state.get(f"doc_{st.session_state.uploader_key}")
-
-    if current_img:
-        st.markdown(f"<div class='file-pill'>📷 Gambar telah dilampirkan</div>", unsafe_allow_html=True)
-    if current_doc:
-        st.markdown(f"<div class='file-pill'>📄 Dokumen telah dilampirkan</div>", unsafe_allow_html=True)
-
-    # Layout ringkas ala Gemini: Popover lampiran & Mic bersebelahan di atas chat input
-    st.markdown('<div class="action-container">', unsafe_allow_html=True)
-    col_tools1, col_tools2, _ = st.columns([1, 1, 8])
-    
-    with col_tools1:
-        with st.popover("📎"):
-            up_img = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"], label_visibility="collapsed", key=f"img_{st.session_state.uploader_key}")
-            up_doc = st.file_uploader("Upload Doc", type=["pdf", "txt"], label_visibility="collapsed", key=f"doc_{st.session_state.uploader_key}")
-            st.session_state.temp_image = up_img
-            st.session_state.temp_doc = up_doc
-
-    with col_tools2:
-        audio_bytes = audio_recorder(
-            text="", 
-            recording_color="#e83a3a", 
-            neutral_color="#888888", 
-            icon_name="microphone", 
-            icon_size="1.5x",
-            key=f"mic_{st.session_state.uploader_key}"
-        )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    prompt_text = st.chat_input("Tanyakan sesuatu pada Lagos AI 9.1...")
-
-# --- 6. LOGIKA PEMROSESAN & TRANSLASI SUARA ---
-prompt = prompt_text
-
-# Cek jika ada audio masuk dan tidak ada ketikan manual
-if audio_bytes and not prompt_text:
-    with st.spinner("Menerjemahkan suara..."):
-        r = sr.Recognizer()
-        try:
-            with io.BytesIO(audio_bytes) as source_bytes:
-                with sr.AudioFile(source_bytes) as source:
-                    audio_data = r.record(source)
-                    # Menerjemahkan menggunakan Google Speech Recognition API (Gratis)
-                    prompt = r.recognize_google(audio_data, language="id-ID")
-        except sr.UnknownValueError:
-            st.warning("Suara tidak terdengar jelas. Silakan coba lagi.")
-            prompt = None
-        except Exception as e:
-            st.error(f"Sistem gagal memproses suara: {e}")
-            prompt = None
-
-# Lanjut ke proses model utama
-if prompt:
-    teks_dokumen = ""
-    if st.session_state.temp_doc:
-        with st.spinner("Membaca referensi dokumen..."):
-            teks_dokumen = ekstrak_teks_dari_dokumen(st.session_state.temp_doc)
-        if teks_dokumen:
-            teks_dokumen = f"[KONTEN DOKUMEN: {st.session_state.temp_doc.name}]\n{teks_dokumen}\n[AKHIR KONTEN]\n\n"
-
-    final_prompt = teks_dokumen + prompt
-
-    if st.session_state.temp_image:
-        base64_img = konversi_gambar_ke_base64(st.session_state.temp_image)
-        konten_payload = [
-            {"type": "text", "text": final_prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-        ]
-    else:
-        konten_payload = final_prompt 
-
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    st.session_state.messages.append({"role": "user", "content": konten_payload})
-
-    with st.chat_message("assistant"):
-        client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
-        placeholder = st.empty()
-        full_response = ""
-
-        try:
-            response_stream = client.chat.completions.create(
-                model=MODEL_NAME, 
-                messages=st.session_state.messages,
-                temperature=0.3,
-                max_tokens=4096,
-                stream=True
+# --- 2. PENGATURAN AWAL (SAAT USER MEMBUKA WEB) ---
+@cl.on_chat_start
+async def start():
+    # Membuat menu pengaturan di pojok layar
+    settings = await cl.ChatSettings(
+        [
+            cl.input_widget.Select(
+                id="Model",
+                label="🧠 Pilih Model AI Aktif",
+                values=list(MODEL_MAPPING.keys()),
+                initial_index=0,
             )
+        ]
+    ).send()
+    
+    cl.user_session.set("model", MODEL_MAPPING[list(MODEL_MAPPING.keys())[0]])
+    cl.user_session.set("message_history", [{"role": "system", "content": "Anda adalah Lagos AI 9.1 (Rian Dev), asisten analitik tingkat tinggi."}])
+    
+    await cl.Message(
+        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** di sebelah kiri kotak teks untuk melampirkan file/gambar, atau klik ikon **🎙️** di kanan untuk berbicara."
+    ).send()
 
-            for chunk in response_stream:
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta.content
-                    if delta:
-                        full_response += delta
-                        placeholder.markdown(full_response + "▌")
+# --- 3. LOGIKA JIKA USER MENGGANTI MODEL ---
+@cl.on_settings_update
+async def setup_agent(settings):
+    cl.user_session.set("model", MODEL_MAPPING[settings["Model"]])
+    await cl.Message(content=f"⚙️ Engine beralih ke: **{settings['Model']}**").send()
 
-            placeholder.markdown(full_response)
-            
-            st.session_state.messages[-1] = {"role": "user", "content": f"[User Query] {prompt}"}
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+# --- 4. LOGIKA UTAMA (SAAT USER MENGIRIM PESAN/FILE/SUARA) ---
+@cl.on_message
+async def main(message: cl.Message):
+    message_history = cl.user_session.get("message_history")
+    model_name = cl.user_session.get("model")
+    
+    # Chainlit otomatis menangkap file yang diunggah
+    images = [file for file in message.elements if "image" in file.mime]
+    docs = [file for file in message.elements if "pdf" in file.mime or "text" in file.mime or "word" in file.mime or "officedocument" in file.mime]
+    audios = [file for file in message.elements if "audio" in file.mime]
+    
+    final_prompt = message.content or ""
+    
+    # Proses Suara (Menggunakan layanan gratis Google)
+    if audios:
+        async with cl.Step(name="Menerjemahkan Suara...") as step:
+            r = sr.Recognizer()
+            try:
+                with sr.AudioFile(audios[0].path) as source:
+                    audio_data = r.record(source)
+                    text_from_voice = r.recognize_google(audio_data, language="id-ID")
+                    final_prompt += f" {text_from_voice}"
+                    step.output = f"Terdengar: {text_from_voice}"
+            except Exception as e:
+                step.is_error = True
+                step.output = "Maaf, suara tidak terdengar jelas."
+    
+    # Proses Dokumen
+    doc_text = ""
+    for doc in docs:
+        if "pdf" in doc.mime:
+            reader = PdfReader(doc.path)
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted: doc_text += extracted + "\n"
+        elif "text" in doc.mime:
+            with open(doc.path, "r", encoding="utf-8") as f:
+                doc_text += f.read() + "\n"
+        elif "officedocument" in doc.mime or "word" in doc.mime:
+            docx_doc = Document(doc.path)
+            for para in docx_doc.paragraphs:
+                doc_text += para.text + "\n"
+                
+    if doc_text:
+        final_prompt = f"[KONTEN DOKUMEN]\n{doc_text}\n[AKHIR KONTEN]\n\n{final_prompt}"
 
-            # Bersihkan uploader gambar dan audio
-            st.session_state.temp_image = None
-            st.session_state.temp_doc = None
-            st.session_state.uploader_key += 1 
-            
-            st.rerun()
+    # Siapkan data untuk dikirim ke NVIDIA
+    if images:
+        content_payload = [{"type": "text", "text": final_prompt}]
+        for img in images:
+            with open(img.path, "rb") as f:
+                base64_img = base64.b64encode(f.read()).decode('utf-8')
+            content_payload.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{img.mime};base64,{base64_img}"}
+            })
+    else:
+        content_payload = final_prompt
 
-        except Exception as e:
-            st.error(f"Kesalahan teknis pada engine Lagos AI: {str(e)}")
-            if st.session_state.messages[-1]["role"] == "user":
-                st.session_state.messages.pop()
+    # Abaikan jika kosong
+    if not final_prompt.strip() and not images:
+        return
+
+    message_history.append({"role": "user", "content": content_payload})
+    msg = cl.Message(content="")
+    await msg.send()
+
+    # Memanggil Engine dengan efek mengetik (Streaming)
+    try:
+        stream = await client.chat.completions.create(
+            messages=message_history,
+            model=model_name,
+            stream=True,
+            temperature=0.3,
+            max_tokens=4096
+        )
+
+        async for part in stream:
+            if part.choices and len(part.choices) > 0:
+                token = part.choices[0].delta.content or ""
+                await msg.stream_token(token)
+                
+    except Exception as e:
+        await cl.Message(content=f"⚠️ Engine Error: {str(e)}").send()
+        message_history.pop() 
+        return
+
+    await msg.update()
+    message_history.append({"role": "assistant", "content": msg.content})
