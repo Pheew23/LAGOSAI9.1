@@ -1,6 +1,10 @@
 import chainlit as cl
-# Tambahkan baris di bawah ini untuk mengaktifkan fitur secara programatik
+
+# Pengaturan otomatis (Menggantikan config.toml)
+cl.config.ui.name = "Lagos AI 9.1"
+cl.config.ui.description = "Premium Multimodal Assistant"
 cl.config.features.audio.enabled = True
+cl.config.ui.theme = "dark"
 from openai import AsyncOpenAI
 import os
 import base64
