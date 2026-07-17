@@ -10,10 +10,8 @@ API_KEY = os.environ.get("NVIDIA_API_KEY")
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY") # Kunci khusus untuk jalur suara
 
-# Engine Utama untuk Analisis & Chat
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# Engine Khusus untuk menerjemahkan Suara
 if GROQ_API_KEY:
     groq_client = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 else:
@@ -30,23 +28,12 @@ MODEL_MAPPING = {
 # --- 2. PENGATURAN AWAL ---
 @cl.on_chat_start
 async def start():
-    # Menampilkan menu pilihan model
-    await cl.ChatSettings(
-        [
-            cl.input_widget.Select(
-                id="Model",
-                label="🧠 Pilih Model AI Aktif",
-                values=list(MODEL_MAPPING.keys()),
-                initial_index=0,
-            )
-        ]
-    ).send()
+    await cl.ChatSettings([
+        cl.input_widget.Select(id="Model", label="🧠 Pilih Model AI Aktif", values=list(MODEL_MAPPING.keys()), initial_index=0,)
+    ]).send()
     
-    # Menetapkan model awal (Stabil)
-    initial_model = MODEL_MAPPING[list(MODEL_MAPPING.keys())[0]]
-    cl.user_session.set("model", initial_model)
+    cl.user_session.set("model", MODEL_MAPPING[list(MODEL_MAPPING.keys())[0]])
     
-    # OTAK KEPRIBADIAN LAGOS AI (Rian Dev)
     system_prompt = """Anda adalah Lagos AI 9.1, asisten kecerdasan buatan premium yang diciptakan oleh Rian Dev. 
     Tugas Anda adalah menjadi asisten yang sangat cerdas, responsif, dan membantu.
     Aturan:
@@ -57,48 +44,69 @@ async def start():
 
     cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
     
-    # Pesan Sambutan
     await cl.Message(
-        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** untuk melampirkan file (Gambar, PDF, Word, Teks)."
+        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, lampirkan dokumen (PDF/Word), atau gunakan ikon **🎙️ Mikrofon** untuk berbicara."
     ).send()
 
-# --- 3. GANTI MODEL ---
 @cl.on_settings_update
 async def setup_agent(settings):
     cl.user_session.set("model", MODEL_MAPPING[settings["Model"]])
     await cl.Message(content=f"⚙️ Engine beralih ke: **{settings['Model']}**").send()
 
-# --- 4. LOGIKA UTAMA ---
-@cl.on_message
-async def main(message: cl.Message):
+# --- 3. MESIN PEMROSES AI (LLM) ---
+async def process_llm(final_prompt, images):
+    if not final_prompt.strip() and not images:
+        return
+
     message_history = cl.user_session.get("message_history")
     model_name = cl.user_session.get("model")
-    
-    # Pemilahan File
+
+    if images:
+        content_payload = [{"type": "text", "text": final_prompt}]
+        for img in images:
+            with open(img.path, "rb") as f:
+                base64_img = base64.b64encode(f.read()).decode('utf-8')
+            content_payload.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{img.mime};base64,{base64_img}"}
+            })
+    else:
+        content_payload = final_prompt
+
+    message_history.append({"role": "user", "content": content_payload})
+    msg = cl.Message(content="")
+    await msg.send()
+
+    try:
+        stream = await client.chat.completions.create(
+            messages=message_history,
+            model=model_name,
+            stream=True,
+            temperature=0.3,
+            max_tokens=4096
+        )
+        async for chunk in stream:
+            if chunk.choices and len(chunk.choices) > 0:
+                token = chunk.choices[0].delta.content or ""
+                if token: 
+                    await msg.stream_token(token)
+    except Exception as e:
+        await cl.Message(content=f"⚠️ Engine Error: {str(e)}").send()
+        message_history.pop() 
+        return
+
+    await msg.update()
+    message_history.append({"role": "assistant", "content": msg.content})
+
+# --- 4. JALUR TEKS & DOKUMEN ---
+@cl.on_message
+async def main(message: cl.Message):
     images = [file for file in message.elements if "image" in file.mime]
     docs = [file for file in message.elements if "pdf" in file.mime or "text" in file.mime or "word" in file.mime or "officedocument" in file.mime]
-    audios = [file for file in message.elements if "audio" in file.mime]
     
     final_prompt = message.content or ""
-    
-    # --- PROSES SUARA VIA GROQ ---
-    if audios and groq_client:
-        async with cl.Step(name="Menerjemahkan Suara...") as step:
-            try:
-                with open(audios[0].path, "rb") as audio_file:
-                    transcription = await groq_client.audio.transcriptions.create(
-                        model="whisper-large-v3",
-                        file=audio_file
-                    )
-                text_from_voice = transcription.text
-                final_prompt += f" {text_from_voice}"
-                step.output = f"Terdengar: {text_from_voice}"
-            except Exception as e:
-                step.is_error = True
-                step.output = f"Gagal memproses suara: {str(e)}"
-    
-    # --- PROSES DOKUMEN ---
     doc_text = ""
+    
     for doc in docs:
         if "pdf" in doc.mime:
             reader = PdfReader(doc.path)
@@ -116,48 +124,33 @@ async def main(message: cl.Message):
     if doc_text:
         final_prompt = f"[KONTEN DOKUMEN]\n{doc_text}\n[AKHIR KONTEN]\n\n{final_prompt}"
 
-    # --- PERSIAPKAN DATA ---
-    if images:
-        content_payload = [{"type": "text", "text": final_prompt}]
-        for img in images:
-            with open(img.path, "rb") as f:
-                base64_img = base64.b64encode(f.read()).decode('utf-8')
-            content_payload.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{img.mime};base64,{base64_img}"}
-            })
-    else:
-        content_payload = final_prompt
+    await process_llm(final_prompt, images)
 
-    # Jangan kirim jika prompt kosong
-    if not final_prompt.strip() and not images:
+# --- 5. JALUR MIKROFON (Pemicu Munculnya Tombol) ---
+@cl.on_audio_end
+async def on_audio_end(elements: list):
+    if not groq_client:
+        await cl.Message(content="⚠️ Kunci API Groq belum diatur di Render.").send()
         return
+        
+    audio_file = elements[0]
+    
+    async with cl.Step(name="Mendengarkan...") as step:
+        try:
+            with open(audio_file.path, "rb") as f:
+                transcription = await groq_client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=f
+                )
+            text_from_voice = transcription.text
+            step.output = f"Berhasil menerjemahkan audio."
+        except Exception as e:
+            step.is_error = True
+            step.output = f"Gagal memproses suara: {str(e)}"
+            return
 
-    # --- SIMPAN & TAMPILKAN PESAN USER ---
-    message_history.append({"role": "user", "content": content_payload})
-    msg = cl.Message(content="")
-    await msg.send()
-
-    # --- MEMANGGIL ENGINE NVIDIA (STREAMING) ---
-    try:
-        stream = await client.chat.completions.create(
-            messages=message_history,
-            model=model_name,
-            stream=True,
-            temperature=0.3,
-            max_tokens=4096
-        )
-
-        async for chunk in stream:
-            if chunk.choices and len(chunk.choices) > 0:
-                token = chunk.choices[0].delta.content or ""
-                if token: 
-                    await msg.stream_token(token)
-                
-    except Exception as e:
-        await cl.Message(content=f"⚠️ Engine Error: {str(e)}").send()
-        message_history.pop() 
-        return
-
-    await msg.update()
-    message_history.append({"role": "assistant", "content": msg.content})
+    # Tampilkan teks hasil suara di layar seolah-olah user mengetiknya
+    await cl.Message(content=f'🎙️ *"{text_from_voice}"*', author="User").send()
+    
+    # Teruskan teks tersebut ke AI
+    await process_llm(text_from_voice, [])
