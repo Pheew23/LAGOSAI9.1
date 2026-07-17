@@ -1,7 +1,5 @@
-streamlit
+chainlit
 openai
-python-docx
 pypdf
-audio-recorder-streamlit
+python-docx
 SpeechRecognition
-requests
