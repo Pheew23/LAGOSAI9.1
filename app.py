@@ -1,14 +1,7 @@
 import chainlit as cl
-
-# Pengaturan otomatis (Menggantikan config.toml)
-cl.config.ui.name = "Lagos AI 9.1"
-cl.config.ui.description = "Premium Multimodal Assistant"
-cl.config.features.audio.enabled = True
-cl.config.ui.theme = "dark"
 from openai import AsyncOpenAI
 import os
 import base64
-import io
 from pypdf import PdfReader
 from docx import Document
 
@@ -20,8 +13,11 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY") # Kunci khusus untuk jalur suara
 # Engine Utama untuk Analisis & Chat
 client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
-# Engine Khusus untuk menerjemahkan Suara ke Teks secepat kilat
-groq_client = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+# Engine Khusus untuk menerjemahkan Suara
+if GROQ_API_KEY:
+    groq_client = AsyncOpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+else:
+    groq_client = None
 
 MODEL_MAPPING = {
     "1. Stabil": "google/gemma-4-31b-it",
@@ -34,7 +30,8 @@ MODEL_MAPPING = {
 # --- 2. PENGATURAN AWAL ---
 @cl.on_chat_start
 async def start():
-    settings = await cl.ChatSettings(
+    # Menampilkan menu pilihan model
+    await cl.ChatSettings(
         [
             cl.input_widget.Select(
                 id="Model",
@@ -45,22 +42,24 @@ async def start():
         ]
     ).send()
     
-    cl.user_session.set("model", MODEL_MAPPING[list(MODEL_MAPPING.keys())[0]])
+    # Menetapkan model awal (Stabil)
+    initial_model = MODEL_MAPPING[list(MODEL_MAPPING.keys())[0]]
+    cl.user_session.set("model", initial_model)
     
-    # --- INI ADALAH OTAK KEPRIBADIAN LAGOS AI ---
-    system_prompt = """Anda adalah Lagos AI 9.1, sebuah asisten kecerdasan buatan tingkat tinggi yang dirancang dan diciptakan secara eksklusif oleh programmer bernama Rian Dev. 
-    Tugas Anda adalah menjadi Premium Multimodal Assistant yang sangat cerdas, sopan, dan solutif.
-    
-    Aturan ketat Anda:
-    1. Jika ditanya siapa Anda, jawablah dengan ramah bahwa Anda adalah Lagos AI 9.1.
-    2. Jika ditanya siapa pencipta Anda, jawablah dengan bangga bahwa Anda diciptakan oleh Rian Dev.
-    3. JANGAN PERNAH menyebutkan identitas model dasar Anda (seperti OpenAI, Llama, Mistral, Gemma, atau NVIDIA). Anda murni adalah Lagos AI.
-    4. Selalu gunakan bahasa Indonesia yang natural, profesional, namun tetap hangat."""
+    # OTAK KEPRIBADIAN LAGOS AI (Rian Dev)
+    system_prompt = """Anda adalah Lagos AI 9.1, asisten kecerdasan buatan premium yang diciptakan oleh Rian Dev. 
+    Tugas Anda adalah menjadi asisten yang sangat cerdas, responsif, dan membantu.
+    Aturan:
+    1. Jika ditanya siapa Anda, jawablah "Saya adalah Lagos AI 9.1".
+    2. Jika ditanya siapa pembuat Anda, jawablah "Saya diciptakan oleh Rian Dev".
+    3. JANGAN PERNAH menyebut model dasar Anda (OpenAI, Llama, dll). 
+    4. Selalu gunakan bahasa Indonesia yang natural."""
 
     cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
     
+    # Pesan Sambutan
     await cl.Message(
-        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** di sebelah kiri kotak teks untuk melampirkan file/gambar, atau tahan ikon **🎙️** di kanan untuk berbicara."
+        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** untuk melampirkan file (Gambar, PDF, Word, Teks)."
     ).send()
 
 # --- 3. GANTI MODEL ---
@@ -69,23 +68,23 @@ async def setup_agent(settings):
     cl.user_session.set("model", MODEL_MAPPING[settings["Model"]])
     await cl.Message(content=f"⚙️ Engine beralih ke: **{settings['Model']}**").send()
 
-# --- 4. LOGIKA UTAMA (MULTIMODAL & VOICE) ---
+# --- 4. LOGIKA UTAMA ---
 @cl.on_message
 async def main(message: cl.Message):
     message_history = cl.user_session.get("message_history")
     model_name = cl.user_session.get("model")
     
+    # Pemilahan File
     images = [file for file in message.elements if "image" in file.mime]
     docs = [file for file in message.elements if "pdf" in file.mime or "text" in file.mime or "word" in file.mime or "officedocument" in file.mime]
     audios = [file for file in message.elements if "audio" in file.mime]
     
     final_prompt = message.content or ""
     
-    # --- PROSES SUARA VIA GROQ (SUPER CEPAT & ANTI CRASH) ---
-    if audios:
+    # --- PROSES SUARA VIA GROQ ---
+    if audios and groq_client:
         async with cl.Step(name="Menerjemahkan Suara...") as step:
             try:
-                # Membuka file rekaman langsung dari server Render
                 with open(audios[0].path, "rb") as audio_file:
                     transcription = await groq_client.audio.transcriptions.create(
                         model="whisper-large-v3",
@@ -117,7 +116,7 @@ async def main(message: cl.Message):
     if doc_text:
         final_prompt = f"[KONTEN DOKUMEN]\n{doc_text}\n[AKHIR KONTEN]\n\n{final_prompt}"
 
-    # --- PERSIAPKAN DATA GAMBAR & TEKS ---
+    # --- PERSIAPKAN DATA ---
     if images:
         content_payload = [{"type": "text", "text": final_prompt}]
         for img in images:
@@ -130,9 +129,11 @@ async def main(message: cl.Message):
     else:
         content_payload = final_prompt
 
+    # Jangan kirim jika prompt kosong
     if not final_prompt.strip() and not images:
         return
 
+    # --- SIMPAN & TAMPILKAN PESAN USER ---
     message_history.append({"role": "user", "content": content_payload})
     msg = cl.Message(content="")
     await msg.send()
