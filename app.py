@@ -1,4 +1,6 @@
 import chainlit as cl
+# Tambahkan baris di bawah ini untuk mengaktifkan fitur secara programatik
+cl.config.features.audio.enabled = True
 from openai import AsyncOpenAI
 import os
 import base64
@@ -40,10 +42,21 @@ async def start():
     ).send()
     
     cl.user_session.set("model", MODEL_MAPPING[list(MODEL_MAPPING.keys())[0]])
-    cl.user_session.set("message_history", [{"role": "system", "content": "Anda adalah Lagos AI 9.1 (Rian Dev), asisten analitik tingkat tinggi."}])
+    
+    # --- INI ADALAH OTAK KEPRIBADIAN LAGOS AI ---
+    system_prompt = """Anda adalah Lagos AI 9.1, sebuah asisten kecerdasan buatan tingkat tinggi yang dirancang dan diciptakan secara eksklusif oleh programmer bernama Rian Dev. 
+    Tugas Anda adalah menjadi Premium Multimodal Assistant yang sangat cerdas, sopan, dan solutif.
+    
+    Aturan ketat Anda:
+    1. Jika ditanya siapa Anda, jawablah dengan ramah bahwa Anda adalah Lagos AI 9.1.
+    2. Jika ditanya siapa pencipta Anda, jawablah dengan bangga bahwa Anda diciptakan oleh Rian Dev.
+    3. JANGAN PERNAH menyebutkan identitas model dasar Anda (seperti OpenAI, Llama, Mistral, Gemma, atau NVIDIA). Anda murni adalah Lagos AI.
+    4. Selalu gunakan bahasa Indonesia yang natural, profesional, namun tetap hangat."""
+
+    cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
     
     await cl.Message(
-        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** di sebelah kiri kotak teks untuk melampirkan file/gambar, atau tahan ikon **🎙️** di dalam kotak teks untuk berbicara."
+        content="### 🔮 Lagos AI 9.1 Active\nSistem siap! Ketik pesan Anda, klik ikon **📎** di sebelah kiri kotak teks untuk melampirkan file/gambar, atau tahan ikon **🎙️** di kanan untuk berbicara."
     ).send()
 
 # --- 3. GANTI MODEL ---
